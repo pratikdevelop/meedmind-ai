@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { AnalysisResult, VisualSymptomResult, MedicationAnalysisResult, DoctorLetter, Vaccine } from "../types";
 
@@ -6,19 +7,39 @@ const API_KEY = process.env.API_KEY || '';
 // Initialize Gemini Client
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 
-// Audio Helper for TTS decoding
-const decodeAudioData = async (
-  base64Data: string,
-  audioContext: AudioContext
-): Promise<AudioBuffer> => {
-  const binaryString = atob(base64Data);
+// Audio Helper for raw PCM decoding
+function decode(base64: string) {
+  const binaryString = atob(base64);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  return await audioContext.decodeAudioData(bytes.buffer);
-};
+  return bytes;
+}
+
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  // Ensure data length is even for Int16Array
+  const byteLength = data.length - (data.length % 2);
+  const safeData = new Uint8Array(data.buffer, 0, byteLength);
+  
+  const dataInt16 = new Int16Array(safeData.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
 
 export const GeminiService = {
   /**
@@ -225,6 +246,8 @@ export const GeminiService = {
       - YELLOW: Moderate (e.g., potential infection, persistent rash, fever signs).
       - RED: Severe/Emergency (e.g., deep wound, heavy bleeding, gangrene, severe allergic reaction, difficulty breathing signs).
 
+      Also provide a "Child Explanation" suitable for a 5-year-old using friendly analogies (e.g. "Your skin is a bit angry because...").
+
       Return strictly JSON.
     `;
 
@@ -234,7 +257,7 @@ export const GeminiService = {
         contents: {
           parts: [
             { inlineData: { mimeType: 'image/jpeg', data: base64Image } },
-            { text: "Identify the condition, possible causes, and urgency level." }
+            { text: "Identify the condition, possible causes, urgency, and give a child-friendly explanation." }
           ]
         },
         config: {
@@ -247,9 +270,10 @@ export const GeminiService = {
               conditionName: { type: Type.STRING, description: "Short descriptive name of the visual symptom" },
               possibleCauses: { type: Type.ARRAY, items: { type: Type.STRING } },
               recommendation: { type: Type.STRING, description: "Short actionable advice" },
-              disclaimer: { type: Type.STRING, description: "Legal medical disclaimer stating this is AI advice only" }
+              disclaimer: { type: Type.STRING, description: "Legal medical disclaimer stating this is AI advice only" },
+              childExplanation: { type: Type.STRING, description: "Simple explanation with analogies for a child." }
             },
-            required: ['urgency', 'conditionName', 'possibleCauses', 'recommendation', 'disclaimer']
+            required: ['urgency', 'conditionName', 'possibleCauses', 'recommendation', 'disclaimer', 'childExplanation']
           }
         }
       });
@@ -364,12 +388,10 @@ export const GeminiService = {
   },
 
   /**
-   * Text-to-Speech Generation
+   * Text-to-Speech Generation with Raw PCM Decoding
    */
   speakText: async (text: string, language: string): Promise<void> => {
     try {
-      // Determine voice based on language roughly (simplification for demo)
-      // Gemini TTS supports specific voices, we'll default to 'Puck' or 'Kore' but let it auto-select if needed.
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: text }] }],
@@ -384,12 +406,18 @@ export const GeminiService = {
       });
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      
       if (!base64Audio) return;
 
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const audioBuffer = await decodeAudioData(base64Audio, audioContext);
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+      const decodedBytes = decode(base64Audio);
       
+      const audioBuffer = await decodeAudioData(
+        decodedBytes,
+        audioContext,
+        24000,
+        1
+      );
+
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioContext.destination);

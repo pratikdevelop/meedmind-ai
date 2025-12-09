@@ -1,3 +1,4 @@
+
 export enum AppMode {
   ONBOARDING = 'ONBOARDING',
   DASHBOARD = 'DASHBOARD',
@@ -49,6 +50,7 @@ export interface VisualSymptomResult {
   possibleCauses: string[];
   recommendation: string;
   disclaimer: string;
+  childExplanation: string; // Added for Teddy Bear mode
 }
 
 export interface Medication {
